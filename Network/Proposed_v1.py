@@ -859,7 +859,7 @@ class BGSNet_AOTGAN(nn.Module):
 class BGSNet_LGNet(nn.Module):
     def __init__(self):
         super(BGSNet_LGNet, self).__init__()
-        self.generator = Generator() #Generator from LGNet
+        self.generator = Generator(use_cuda=True,device_ids=0) #Generator from LGNet
 
     def forward(self, input, mask):
         # input = (input + 1)/2

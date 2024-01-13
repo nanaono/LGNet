@@ -7,10 +7,10 @@ from Network.LGNet.model.Attention import GlobalLocalAttention, GlobalAttention
 
 
 class Generator(nn.Module):
-    def __init__(self, config, use_cuda, device_ids):
+    def __init__(self, use_cuda, device_ids):
         super(Generator, self).__init__()
-        self.input_dim = config['input_dim']
-        self.cnum = config['ngf']
+        self.input_dim = 5
+        self.cnum = 32
         self.use_cuda = use_cuda
         self.device_ids = device_ids
 
@@ -24,7 +24,7 @@ class Generator(nn.Module):
 
 
 class CoarseGenerator(nn.Module):
-    def __init__(self, input_dim, cnum, use_cuda=True, device_ids=None):
+    def __init__(self, input_dim, cnum, use_cuda=True, device_ids=0):
         super(CoarseGenerator, self).__init__()
         self.use_cuda = use_cuda
         self.device_ids = device_ids
@@ -111,7 +111,7 @@ class CoarseGenerator(nn.Module):
 
 
 class FineGenerator(nn.Module):
-    def __init__(self, input_dim, cnum, use_cuda=True, device_ids=None):
+    def __init__(self, input_dim, cnum, use_cuda=True, device_ids=0):
         super(FineGenerator, self).__init__()
         self.use_cuda = use_cuda
         self.device_ids = device_ids
@@ -203,10 +203,10 @@ class FineGenerator(nn.Module):
         return x_stage2
 
 class GlobalDis(nn.Module):
-    def __init__(self, config, use_cuda=True, device_ids=None):
+    def __init__(self, use_cuda=True, device_ids=0):
         super(GlobalDis, self).__init__()
-        self.input_dim = config['input_dim']
-        self.cnum = config['ndf']
+        self.input_dim = 3
+        self.cnum = 64
         self.use_cuda = use_cuda
         self.device_ids = device_ids
 
