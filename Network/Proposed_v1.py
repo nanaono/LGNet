@@ -842,7 +842,6 @@ class BGSNet_AOTGAN(nn.Module):
     def forward(self, input, mask):
         # input = (input + 1)/2
         inv_mask = 1. - mask
-
         roi = input * mask
 
         # x = torch.cat((input,mask[:,0,:,:]),1)
@@ -857,23 +856,22 @@ class BGSNet_AOTGAN(nn.Module):
         return output    
     
 class BGSNet_LGNet(nn.Module):
-    def __init__(self):
+    def __init__(self, device_ids):
         super(BGSNet_LGNet, self).__init__()
-        self.generator = Generator(use_cuda=True,device_ids=0) #Generator from LGNet
+        self.generator = Generator(use_cuda=True,device_ids=device_ids) # Generator from LGNet
 
     def forward(self, input, mask):
         # input = (input + 1)/2
         inv_mask = 1. - mask
-
         roi = input * mask
-
         # x = torch.cat((input,mask[:,0,:,:]),1)
         # x = mask[:,0:1,:,:]
         # print(x.size())
-
-        fake_img = self.generator(input,inv_mask[:,0:1,:,:]) 
-        # print(fake_img.size())
-        # print('roi',roi.size())
-        output = roi + fake_img * inv_mask
+        fake_img1, fake_img2= self.generator(input,inv_mask[:,0:1,:,:]) 
+        # print('roi',roi.shape(),roi.dtype())
+        # print('mask',inv_mask.shape(),inv_mask.dtype())
+        
+        output = roi + fake_img2 * inv_mask
+        # print(roi.type())
         # utils.save_image(fake_img[0:4,:,:,:], f"masked_img.png", nrow=1, normalize=False)
-        return output          
+        return fake_img1, output          

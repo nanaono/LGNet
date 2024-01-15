@@ -21,6 +21,7 @@ from math import log10
 import numpy as np
 import random
 import glob
+from math import exp
 # import matplotlib.pyplot as plt
 
 #################### Import network, dataloader, loss function
@@ -36,7 +37,7 @@ from utils.LoadData import Load_ImagesDataset
 parser = argparse.ArgumentParser(description = 'TRAINING VCM MODEL')
 parser.add_argument('--num_epochs', default = 100, type = int)
 parser.add_argument('--is_cuda', default = 'cuda', type = str)
-parser.add_argument('--batch_size', default = 22, type = int) # default from StyleGAN2
+parser.add_argument('--batch_size', default = 16, type = int) # default from StyleGAN2
 # parser.add_argument("--iter", type=int, default=800000, help="total training iterations") # default from StyleGAN2
 parser.add_argument("--lr", type=float, default=0.0001, help="learning rate") # default from StyleGAN2
 parser.add_argument("--d_reg_every", type=int, default=16, help="interval of the applying r1 regularization") # default from StyleGAN2
@@ -226,8 +227,67 @@ def dis_forward(netD, ground_truth, x_inpaint): # discriminator, gt, output
     batch_data = torch.cat([ground_truth, x_inpaint], dim=0)
     batch_output = netD(batch_data)
     real_pred, fake_pred = torch.split(batch_output, batch_size, dim=0)
-
+    # print('fake_pred.grad_fn', fake_pred.grad_fn)
     return real_pred, fake_pred
+
+class SSIM(torch.nn.Module):
+    def __init__(self, window_size=11, size_average=True):
+        super(SSIM, self).__init__()
+        self.window_size = window_size
+        self.size_average = size_average
+        self.channel = 1
+        self.window = create_window(window_size, self.channel)
+
+    def forward(self, img1, img2):
+        (_, channel, _, _) = img1.size()
+
+        if channel == self.channel and self.window.data.type() == img1.data.type():
+            window = self.window
+        else:
+            window = create_window(self.window_size, channel)
+
+            if img1.is_cuda:
+                window = window.cuda(img1.get_device())
+            window = window.type_as(img1)
+
+            self.window = window
+            self.channel = channel
+
+        return _ssim(img1, img2, window, self.window_size, channel, self.size_average)
+
+def create_window(window_size, channel):
+    _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
+    _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+    window = Variable(_2D_window.expand(channel, 1, window_size, window_size).contiguous())
+    return window
+
+
+def _ssim(img1, img2, window, window_size, channel, size_average=True):
+    mu1 = F.conv2d(img1, window, padding=window_size // 2, groups=channel)
+    mu2 = F.conv2d(img2, window, padding=window_size // 2, groups=channel)
+
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
+    sigma2_sq = F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
+    sigma12 = F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel) - mu1_mu2
+
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+
+    if size_average:
+        return ssim_map.mean()
+    else:
+        return ssim_map.mean(1).mean(1).mean(1)
+
+def gaussian(window_size, sigma):
+    gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
+    return gauss / gauss.sum()
+
 #cmd : CUDA_VISIBLE_DEVICES="0,1" python -m torch.distributed.launch --nproc_per_node=2 train_LGNet.py
 
 #################### Main code
@@ -269,7 +329,7 @@ if __name__ == '__main__':
                                                     num_workers=8)
 
     ### Define Generator Network
-    BG_Generator = BGSNet_LGNet()#BGSNet_LGNet 
+    BG_Generator = BGSNet_LGNet(DEVICE)#BGSNet_LGNet 
     BG_Generator.cuda()
     ### Loading average style vectors of pre-trained styleGAN
     discriminator = GlobalDis() #original globalD
@@ -288,6 +348,7 @@ if __name__ == '__main__':
     # w_loss = WNormLoss()
     style_loss = Style()
     lpips_loss = Perceptual()
+    ssim_loss = SSIM()
     # lpips_loss = LPIPS(net_type='vgg').cuda().eval()
     # hrf_loss = ResNetPL().cuda().eval()
     ### Define Optimizers
@@ -296,8 +357,8 @@ if __name__ == '__main__':
 
     # params = list(BG_Generator.encoder.parameters())
     # params += list(BG_Generator.decoder.parameters())
-    g_optim = optim.Adam(BG_Generator.parameters(), lr = LR, betas=(0.5, 0.999) )
-    d_optim = optim.Adam(discriminator.parameters(), lr = LR, betas=(0.5, 0.999))
+    g_optim = optim.Adam(BG_Generator.parameters(), lr = LR, betas=(0.5, 0.9) )
+    d_optim = optim.Adam(discriminator.parameters(), lr = LR, betas=(0.5, 0.9))
     
     ### Continue training ...
     # g_optim.load_state_dict(state_dict1["g_optim"])
@@ -340,15 +401,16 @@ if __name__ == '__main__':
                     ###########################
                     ### Train Discriminator ###
                     ###########################
-                    requires_grad(discriminator, True)
-                    requires_grad(BG_Generator, False)
+                    # requires_grad(discriminator, True)
+                    # requires_grad(BG_Generator, False)
                     # d_optim.zero_grad()
 
-                    fake_img = BG_Generator(input, mask) 
-
+                    fake_img1, fake_img2 = BG_Generator(input, mask)
+                    x1_inpaint = fake_img1*(1 -mask) + input*mask
+                    x2_inpaint = fake_img2*(1 -mask) + input*mask
                     # fake_pred = discriminator(fake_img) #.detach -> no backpropogation
                     # real_pred = discriminator(gt * inv_mask + input*mask)
-                    refine_real, refine_fake = dis_forward(discriminator, gt, fake_img)
+                    refine_real, refine_fake = dis_forward(discriminator, gt, x2_inpaint.detach())
                     
                     d_loss_rel=torch.mean(torch.log(1.0 + torch.abs(refine_real - refine_fake)))
                     d_loss_loren=(torch.mean(
@@ -362,21 +424,26 @@ if __name__ == '__main__':
 
                     # Backpropagation (Optimizing)
                     discriminator.zero_grad()
-                    d_loss.backward()
+                    d_loss.backward(retain_graph=True)
                     d_optim.step()
 
                     ###########################
                     ##### Train Generator #####
                     ###########################
-                    requires_grad(BG_Generator, True)
-                    requires_grad(discriminator, False)
+                    # requires_grad(BG_Generator, True)
+                    # requires_grad(discriminator, False)
                     # g_optim.zero_grad()
 
-                    fake_img = BG_Generator(input, mask) 
-                    fake_pred = discriminator(fake_img)
-                    g_loss = g_nonsaturating_loss(fake_pred)
-
-                    l1_loss = L1_loss(fake_img * inv_mask, gt * inv_mask)
+                    # fake_img1, fake_img2 = BG_Generator(input, mask) 
+                    # fake_pred = discriminator(fake_img1)
+                    # g_loss = g_nonsaturating_loss(fake_pred)
+                    
+                    # l1_loss = L1_loss(fake_img * inv_mask, gt * inv_mask)
+                    l1 = nn.L1Loss()(fake_img1 * (1. - mask), gt * (1. - mask)) * 1.2 \
+                        + nn.L1Loss()(fake_img2 * (1. - mask), gt * (1. - mask))
+                    ssim = ((1. - ssim_loss(gt, x1_inpaint)) + (1.0 - ssim_loss(gt, x2_inpaint))) / 2.0
+                    l1_loss = l1 * 0.75 + ssim * 0.25
+                    refine_real, refine_fake = dis_forward(discriminator, gt, x2_inpaint)
                     # cycle_loss = L1_loss(compressed_img * inv_mask, input * inv_mask)
                     # lpips_loss_ = lpips_loss(fake_img* inv_mask + input*mask, gt * inv_mask + input*mask)
                     # style_loss_ = style_loss(fake_img* inv_mask + input*mask, gt * inv_mask + input*mask)
@@ -389,12 +456,14 @@ if __name__ == '__main__':
 
                     
                     # # Save loss
-                    # loss_dict["pixel"] = pixel_loss
-                    # loss_dict["g"] = g_loss
-                    # loss_dict["g_total"] = tot_loss
+                    loss_dict["l1"] = l1_loss
+                    loss_dict["d_loss"] = d_loss
+                    loss_dict["g_loss"] = g_loss_rel+g_loss_loren
+                    # loss_dict["tot_loss"] = tot_loss
 
                     # Backpropagation (Optimizing)
                     BG_Generator.zero_grad()
+                    # torch.autograd.set_detect_anomaly(True) 
                     tot_g_loss.backward()
                     g_optim.step()
 
@@ -404,43 +473,35 @@ if __name__ == '__main__':
 
                     loss_reduced = reduce_loss_dict(loss_dict)
 
-                    d_loss_ = loss_reduced["d"].mean().item()
-                    g_loss_ = loss_reduced["g"].mean().item()
-                    p_loss_ = loss_reduced["pixel"].mean().item()
-                    # r1_ = loss_reduced["r1"].mean().item()
-                    real_score_ = loss_reduced["real_score"].mean().item()
-                    fake_score_ = loss_reduced["fake_score"].mean().item()
+                    d_loss_ = loss_reduced["d_loss"].mean().item()
+                    g_loss_ = loss_reduced["g_loss"].mean().item()
+                    p_loss_ = loss_reduced["l1"].mean().item()
 
 
                     if is_main_process():
                         if count % 50 == 0:
                             print('[%d/%d][%d/%d]---------------------------------------------' %(epoch, NUM_EPOCHS, count, len(data_train_loader)))
-                            print('-----Discriminator-----')
-                            print('D loss: %.4f\t Real score: %.4f\t Fake score: %.4f' %(
-                                    d_loss_, real_score_, fake_score_))
-
-                            print('-----Generator-----')
-                            print('Tot_g_loss: %.4f \t   ' %(
-                                    tot_g_loss.mean().item(),))
+                            print('L1: %.4f \t d_loss: %.4f \t g_loss: %.4f \t   ' %(
+                                    p_loss_, d_loss_, g_loss_))
                             
                             # Save images
-                            BG_Generator.eval()
-                            with torch.no_grad():
-                                inv_mask_ = 1 - mask[0:4,:,:,:]
+                            # BG_Generator.eval()
+                            # with torch.no_grad():
+                            #     inv_mask_ = 1 - mask[0:4,:,:,:]
                                 
-                                fake_img = BG_Generator(input[0:4,:,:,:], mask[0:4,:,:,:])
-                                # fake_img, _ = BG_Generator(input[0:BATCH,:,:,:], mask[0:BATCH,:,:,:], wbar[0:BATCH,:,:])
-                                # fake_img = fake_img * inv_mask_ + input[0:1,:,:,:] * mask[0:1,:,:,:]
-                                # fake_img, _ = BG_Generator(input[0:1,:,:,:], mask[0:1,:,:,:])
+                            #     fake_img = BG_Generator(input[0:4,:,:,:], mask[0:4,:,:,:])
+                            #     # fake_img, _ = BG_Generator(input[0:BATCH,:,:,:], mask[0:BATCH,:,:,:], wbar[0:BATCH,:,:])
+                            #     # fake_img = fake_img * inv_mask_ + input[0:1,:,:,:] * mask[0:1,:,:,:]
+                            #     # fake_img, _ = BG_Generator(input[0:1,:,:,:], mask[0:1,:,:,:])
 
-                                fake_img_save = (fake_img + 1) / 2
-                                input_save = (input[0:4,:,:,:] + 1) / 2
+                            #     fake_img_save = (fake_img + 1) / 2
+                            #     input_save = (input[0:4,:,:,:] + 1) / 2
                                 
-                            utils.save_image(mask[0:4,:,:,:], f"mask_LGNet.png", nrow=2, normalize=False)
-                            utils.save_image(input_save, f"input_LGNet.png", nrow=2, normalize=False)
-                            utils.save_image(fake_img_save, f"out_LGNet.png", nrow=2, normalize=False)
+                            # utils.save_image(mask[0:4,:,:,:], f"mask_LGNet.png", nrow=2, normalize=False)
+                            # utils.save_image(input_save, f"input_LGNet.png", nrow=2, normalize=False)
+                            # utils.save_image(fake_img_save, f"out_LGNet.png", nrow=2, normalize=False)
 
-                            BG_Generator.train()
+                            # BG_Generator.train()
                         
                     ###########################
                     ###########################
